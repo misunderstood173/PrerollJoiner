@@ -13,6 +13,7 @@ MainWindow::MainWindow(QWidget *parent) :
 {
     ui->setupUi(this);
 
+    ui->checkBoxFPS->setVisible(FALSE);
     this->setFixedSize(geometry().size());
 
     ConversionProcess = new QProcess(this);
@@ -26,12 +27,12 @@ MainWindow::MainWindow(QWidget *parent) :
     if(!QFile(QDir::currentPath() + "/ffmpeg.exe").exists())
     {
         QMessageBox::information(this, tr("ffmpeg"),tr("ffmpeg.exe not found in current directory"));
-        return;
+        closeEvent(NULL);
     }
     if(!QFile(QDir::currentPath() + "/MediaInfo.exe").exists())
     {
         QMessageBox::information(this, tr("MediaInfo"),tr("MediaInfo.exe not found in current directory"));
-        return;
+        closeEvent(NULL);
     }
 
     LastDirectory = QDir::currentPath();
@@ -139,9 +140,37 @@ void MainWindow::processStarted()
 
 void MainWindow::readyReadStandardOutput()
 {
-    QString output = ConversionProcess->readAllStandardOutput();
-    if(output == "") return;
-    ui->txtStandardOutput->append(output);
+    bool frame=FALSE;
+    if(Output.startsWith("frame="))
+        frame = TRUE;
+    Output = ConversionProcess->readAllStandardOutput();
+    //qDebug() << Output;
+    if(frame)
+    {
+        if(Output.startsWith("\r"))
+        {
+            Output = "frame=";
+            //qDebug() << "line skipped";
+            return;
+        }
+        if(Output.startsWith("frame="))
+        {
+            Output = Output.left(Output.indexOf("\rframe"));
+            Output.remove(Output.length()-1, 1);
+            //qDebug() << "line deleted";
+            ui->txtStandardOutput->setFocus();
+            ui->txtStandardOutput->moveCursor(QTextCursor::End, QTextCursor::MoveAnchor);
+            ui->txtStandardOutput->textCursor().deletePreviousChar();
+            QTextCursor storeCursorPos = ui->txtStandardOutput->textCursor();
+            ui->txtStandardOutput->moveCursor(QTextCursor::End, QTextCursor::MoveAnchor);
+            ui->txtStandardOutput->moveCursor(QTextCursor::StartOfLine, QTextCursor::MoveAnchor);
+            ui->txtStandardOutput->moveCursor(QTextCursor::End, QTextCursor::KeepAnchor);
+            ui->txtStandardOutput->textCursor().removeSelectedText();
+            ui->txtStandardOutput->textCursor().deletePreviousChar();
+            ui->txtStandardOutput->setTextCursor(storeCursorPos);
+        }
+    }
+    ui->txtStandardOutput->append(Output);
 
     ui->txtStandardOutput->verticalScrollBar()->setSliderPosition(ui->txtStandardOutput->verticalScrollBar()->maximum());
 }
@@ -177,10 +206,12 @@ void MainWindow::encodingFinished()
     }
     else
     {
+        ui->checkBoxFPS->setEnabled(TRUE);
         ui->btnStart->setEnabled(TRUE);
         ui->btnBrowseOutputDirectory->setEnabled(TRUE);
         ui->btnAddPreroll->setEnabled(TRUE);
         ui->btnRemoveLastPreroll->setEnabled(TRUE);
+        ui->checkBoxFPS->setEnabled(TRUE);
         if(ui->rbtnDirectory->isChecked())
             ui->btnBrowseInputDirectory->setEnabled(TRUE);
         if(ui->rbtnVideos->isChecked())
@@ -217,12 +248,16 @@ void MainWindow::ReadMediaInfo()
     {
         sampleRate = output.mid(10, 5);
     }
-    if(output.startsWith("Resolution"))
+    else if(output.startsWith("Resolution"))
     {
         QStringList temp = output.split(' ');
         if(temp.count() < 3) return;
         videoWidth = temp.at(1).toInt();
         videoHeight = temp.at(2).left(temp.at(2).indexOf('\\')).toInt();
+    }
+    else if(output.startsWith("FPS"))
+    {
+        fps = output.mid(3,output.indexOf('\r') - 3);
     }
 }
 
@@ -234,6 +269,7 @@ void MainWindow::on_btnBrowseInputDirectory_clicked()
     LastDirectory = filePath;
     ui->editInputDirectory->setText(filePath);
 
+    ui->lblSelectedVideosCount->setText("Loading...");
     ui->txtSelectedVideos->clear();
     QDir dir(filePath, "*.mp4");
     QFileInfoList files = dir.entryInfoList();
@@ -292,6 +328,8 @@ void MainWindow::on_btnBrowseVideos_clicked()
         ui->lblSelectedVideosCount->setText("0 selected videos");
         return;
     }
+
+    ui->lblSelectedVideosCount->setText("Loading...");
     LastDirectory = QFileInfo(selectedVideos.at(selectedVideos.length() - 1)).path();
     ui->txtSelectedVideos->clear();
 
@@ -441,7 +479,7 @@ void MainWindow::on_btnStart_clicked()
         size += QFileInfo(preroll).size()*2*selectedVideos.count();
     }
     quint64 availableBytes = QStorageInfo(outputDirectory).bytesAvailable();
-    size *= 1.2;
+    size *= 1.05;
     if(availableBytes < size)
     {
         QMessageBox::information(this, tr("Size"),"The joined videos will occupy approximately " + QString::number(size/1024/1024/1024.0) + "GB. Make sure you have enough free space.\n"
@@ -471,7 +509,7 @@ void MainWindow::on_btnStart_clicked()
     ui->btnClearSelection->setEnabled(FALSE);
     ui->btnRemoveLastPreroll->setEnabled(FALSE);
     ui->btnBrowseVideos->setEnabled(FALSE);
-
+    ui->checkBoxFPS->setEnabled(FALSE);
 
 
     QStringList frontDeleted;
@@ -510,33 +548,48 @@ void MainWindow::on_btnStart_clicked()
                                                        +  QString::number(selectedVideos.count()) + ") 1.Converting:  "
                                                        + QFileInfo(intermediate1).fileName());
 
-        QString videoSampleRate, prerollSampleRate;
+        QString videoSampleRate, prerollSampleRate, videoFPS, prerollFPS;
+
+        if(ui->checkBoxFPS->isChecked())
+        {
+            MediaInfoProcess->start("MediaInfo --Inform=\"Video;FPS%FrameRate%\" \"" + video + "\"");
+            MediaInfoProcess->waitForFinished();
+            videoFPS = fps;
+        }
 
         MediaInfoProcess->start("MediaInfo --Language=raw --Full --Inform=\"Audio;SampleRate%SamplingRate%\" \"" + video + "\"");
         MediaInfoProcess->waitForFinished();
-        ui->txtStandardOutput->append(sampleRate + "Hz - " + QFileInfo(video).fileName());
+        ui->txtStandardOutput->append(sampleRate + "Hz - " + (ui->checkBoxFPS->isChecked()? (videoFPS + " fps "):"") + QFileInfo(video).fileName());
         ui->txtStandardOutput->repaint();
         videoSampleRate = sampleRate;
+
 
         foreach (QString preroll, prerolls)
         {
             input2 = preroll;
-            intermediate2 = QDir::currentPath() + "/Prerolls/" + QFileInfo(input2).baseName() + ".ts";
+            intermediate2 = QDir::currentPath() + "/Prerolls/" + QFileInfo(input2).baseName() + " " + videoSampleRate + "Hz " + (ui->checkBoxFPS->isChecked()? (videoFPS + "fps"):"") + ".ts";
+
+            if(ui->checkBoxFPS->isChecked())
+            {
+                MediaInfoProcess->start("MediaInfo --Inform=\"Video;FPS%FrameRate%\" \"" + preroll + "\"");
+                MediaInfoProcess->waitForFinished();
+                prerollFPS = fps;
+            }
 
             MediaInfoProcess->start("MediaInfo --Language=raw --Full --Inform=\"Audio;SampleRate%SamplingRate%\" \"" + preroll + "\"");
             MediaInfoProcess->waitForFinished();
-            ui->txtStandardOutput->append(sampleRate + "Hz - " + QFileInfo(preroll).fileName());
+            ui->txtStandardOutput->append(sampleRate + "Hz - " + (ui->checkBoxFPS->isChecked()? (prerollFPS + " fps "):"") + QFileInfo(video).fileName());
             ui->txtStandardOutput->repaint();
             prerollSampleRate = sampleRate;
 
-            if(videoSampleRate != prerollSampleRate)
+            if(videoSampleRate != prerollSampleRate || videoFPS != prerollFPS)
             {
-                QString temp = QDir::currentPath() + "/Prerolls/" + QFileInfo(input2).baseName() + " " + videoSampleRate;
+                QString temp = QDir::currentPath() + "/Prerolls/" + QFileInfo(input2).baseName() + " " + videoSampleRate + "Hz " + (ui->checkBoxFPS->isChecked()? (videoFPS + "fps"):"");
                 if(!QFile(temp + ".ts").exists())
                 {
-                    ui->txtStandardOutput->append("Different Audio Sample Rates. Converting Preroll with video's Sample Rate: " + videoSampleRate + " Hz");
+                    ui->txtStandardOutput->append("Differences found. Converting Preroll with: " + videoSampleRate + " Hz" + (ui->checkBoxFPS->isChecked()? (" " + videoFPS + " fps"):""));
                     ui->txtStandardOutput->repaint();
-                    processQueue.push_front("ffmpeg -i \"" + input2 + "\" -ar " + videoSampleRate + " -n \"" + temp + ".mp4" + "\"");
+                    processQueue.push_front("ffmpeg -i \"" + input2 + "\"" + (ui->checkBoxFPS->isChecked()? (" -r " + videoFPS):"") + " -ar " + videoSampleRate + " -n \"" + temp + ".mp4" + "\"");
                     lastConvertedPath.push_front(temp + ".mp4");
                     messageQueue.push_front("(" + QString::number(currentFileConvertingNumber) + "/"
                                                                    +  QString::number(selectedVideos.count()) + ") 2.Additional.Converting:  "
@@ -600,7 +653,7 @@ bool MainWindow::WordsCountCheck(QString &s)
 {
     QString name = QFileInfo(s).fileName();
     name = name.left(name.length() - QString(".mp4").length());
-    QStringList temp = name.split(QRegExp("(\\ |\\,|\\.|\\:)"), QString::SkipEmptyParts);
+    QStringList temp = name.split(QRegExp("(\\ |\\.|\\:)"), QString::SkipEmptyParts);
     if(temp.count() > 7) return FALSE;
     name.clear();
     foreach (QString word, temp) {

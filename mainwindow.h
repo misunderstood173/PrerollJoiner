@@ -50,7 +50,9 @@ private:
     QStringList processQueue;
     QStringList messageQueue;
     QStringList toBeDeleted;
+    QString Output;
     QString sampleRate;
+    QString fps;
     int videoWidth;
     int videoHeight;
     int currentFileConvertingNumber;
